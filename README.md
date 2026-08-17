@@ -3,7 +3,8 @@
 A Go service that receives call-completion webhooks from our telephony provider,
 stores them, and updates per-account call statistics.
 
-It is in production. It is misbehaving.
+> **Status:** Defects fixed, idempotent ingestion implemented, and test suite expanded. See [SOLUTION.md](SOLUTION.md) for architectural details, trade-offs, and scaling roadmap.
+
 
 ## The incident
 
