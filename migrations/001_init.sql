@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS events (
     received_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS idx_events_event_id ON events (event_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_events_event_id ON events (event_id);
 
 CREATE TABLE IF NOT EXISTS calls (
     call_id             TEXT PRIMARY KEY,
