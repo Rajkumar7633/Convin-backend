@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/convin/webhook-ingest/internal/testutil"
 )
@@ -82,3 +83,83 @@ func TestDuplicateDeliveryIsIgnored(t *testing.T) {
 		t.Fatalf("stored %d copies of %s, want 1", n, eventID)
 	}
 }
+
+func TestConcurrentDuplicateDeliveriesAreIdempotent(t *testing.T) {
+	srv, st := testutil.NewServer(t)
+	eventID, callID, accountID := testutil.IDs(t, st)
+	ctx := context.Background()
+
+	body := eventJSON(eventID, callID, accountID)
+	concurrency := 20
+	errCh := make(chan error, concurrency)
+	start := make(chan struct{})
+
+	for i := 0; i < concurrency; i++ {
+		go func() {
+			<-start
+			resp, err := http.Post(srv.URL+"/webhooks/calls", "application/json", strings.NewReader(body))
+			if err != nil {
+				errCh <- err
+				return
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				errCh <- fmt.Errorf("got status %d, want 200", resp.StatusCode)
+				return
+			}
+			errCh <- nil
+		}()
+	}
+
+	close(start)
+
+	for i := 0; i < concurrency; i++ {
+		if err := <-errCh; err != nil {
+			t.Fatalf("concurrent delivery failed: %v", err)
+		}
+	}
+
+	var eventCount int
+	if err := st.Pool().QueryRow(ctx, `SELECT count(*) FROM events WHERE event_id = $1`, eventID).Scan(&eventCount); err != nil {
+		t.Fatalf("scan event count: %v", err)
+	}
+	if eventCount != 1 {
+		t.Fatalf("expected exactly 1 event stored, got %d", eventCount)
+	}
+
+	stats, err := st.AccountStats(ctx, accountID)
+	if err != nil {
+		t.Fatalf("AccountStats: %v", err)
+	}
+	if stats.CallCount != 1 || stats.TotalDurationSec != 143 {
+		t.Fatalf("stats drifted! got CallCount=%d TotalDurationSec=%d, want CallCount=1 TotalDurationSec=143",
+			stats.CallCount, stats.TotalDurationSec)
+	}
+}
+
+func TestRecordingEventuallyProcessed(t *testing.T) {
+	srv, st := testutil.NewServer(t)
+	eventID, callID, accountID := testutil.IDs(t, st)
+	ctx := context.Background()
+
+	body := eventJSON(eventID, callID, accountID)
+	if resp := post(t, srv.URL+"/webhooks/calls", body); resp.StatusCode != http.StatusOK {
+		t.Fatalf("got %d, want 200", resp.StatusCode)
+	}
+
+	// Poll for up to 1 second for recording_processed to be set to true
+	var processed bool
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		row := st.Pool().QueryRow(ctx, `SELECT recording_processed FROM calls WHERE call_id = $1`, callID)
+		if err := row.Scan(&processed); err == nil && processed {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if !processed {
+		t.Fatalf("expected recording_processed to be true for call %s, but it was false (recording work failed silently)", callID)
+	}
+}
+

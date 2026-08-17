@@ -30,3 +30,33 @@ func TestCacheGetUnknownAccountIsZero(t *testing.T) {
 		t.Fatalf("got %+v, want zero value", got)
 	}
 }
+
+func TestCacheConcurrentAccess(t *testing.T) {
+	c := stats.NewCache()
+	const numGoroutines = 50
+	const opsPerGoroutine = 100
+
+	done := make(chan bool, numGoroutines)
+	for i := 0; i < numGoroutines; i++ {
+		go func(id int) {
+			for j := 0; j < opsPerGoroutine; j++ {
+				c.Record("acc_shared", 10)
+				_ = c.Get("acc_shared")
+			}
+			done <- true
+		}(i)
+	}
+
+	for i := 0; i < numGoroutines; i++ {
+		<-done
+	}
+
+	got := c.Get("acc_shared")
+	expectedCount := int64(numGoroutines * opsPerGoroutine)
+	expectedDuration := expectedCount * 10
+	if got.CallCount != expectedCount || got.TotalDurationSec != expectedDuration {
+		t.Fatalf("concurrent cache corrupted: got CallCount=%d TotalDurationSec=%d, want CallCount=%d TotalDurationSec=%d",
+			got.CallCount, got.TotalDurationSec, expectedCount, expectedDuration)
+	}
+}
+
