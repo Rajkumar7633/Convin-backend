@@ -85,3 +85,43 @@ func TestAccountStatsEndpointRespondsJSON(t *testing.T) {
 		t.Fatalf("Content-Type is %q, want application/json", ct)
 	}
 }
+
+func TestWebhookRejectsMissingCallID(t *testing.T) {
+	srv, st := testutil.NewServer(t)
+	eventID, _, accountID := testutil.IDs(t, st)
+
+	body := fmt.Sprintf(
+		`{"event_id":%q,"account_id":%q,"status":"completed","duration_sec":10}`,
+		eventID, accountID)
+	resp := post(t, srv.URL+"/webhooks/calls", body)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestWebhookRejectsMissingAccountID(t *testing.T) {
+	srv, st := testutil.NewServer(t)
+	eventID, callID, _ := testutil.IDs(t, st)
+
+	body := fmt.Sprintf(
+		`{"event_id":%q,"call_id":%q,"status":"completed","duration_sec":10}`,
+		eventID, callID)
+	resp := post(t, srv.URL+"/webhooks/calls", body)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestWebhookRejectsNegativeDuration(t *testing.T) {
+	srv, st := testutil.NewServer(t)
+	eventID, callID, accountID := testutil.IDs(t, st)
+
+	body := fmt.Sprintf(
+		`{"event_id":%q,"call_id":%q,"account_id":%q,"status":"completed","duration_sec":-5}`,
+		eventID, callID, accountID)
+	resp := post(t, srv.URL+"/webhooks/calls", body)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400", resp.StatusCode)
+	}
+}
+
