@@ -3,11 +3,14 @@ package ingest_test
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/convin/webhook-ingest/internal/ingest"
+	"github.com/convin/webhook-ingest/internal/stats"
 	"github.com/convin/webhook-ingest/internal/testutil"
 )
 
@@ -162,4 +165,71 @@ func TestRecordingEventuallyProcessed(t *testing.T) {
 		t.Fatalf("expected recording_processed to be true for call %s, but it was false (recording work failed silently)", callID)
 	}
 }
+
+func TestGracefulShutdownDrainsInFlightTasks(t *testing.T) {
+	st := testutil.NewStore(t)
+	eventID, callID, accountID := testutil.IDs(t, st)
+	ctx := context.Background()
+
+	svc := ingest.New(st, stats.NewCache(), nil, slog.Default())
+
+	evt := ingest.Event{
+		EventID:      eventID,
+		CallID:       callID,
+		AccountID:    accountID,
+		Status:       "completed",
+		DurationSec:  60,
+		RecordingURL: "https://example.com/recording.wav",
+		OccurredAt:   time.Now(),
+	}
+
+	if err := svc.Ingest(ctx, evt); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+
+	// Immediately trigger shutdown with a reasonable timeout
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := svc.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("Shutdown failed: %v", err)
+	}
+
+	// After shutdown returns, the in-flight recording task MUST be finished and marked processed
+	var processed bool
+	row := st.Pool().QueryRow(ctx, `SELECT recording_processed FROM calls WHERE call_id = $1`, callID)
+	if err := row.Scan(&processed); err != nil {
+		t.Fatalf("scan recording_processed: %v", err)
+	}
+	if !processed {
+		t.Fatal("expected in-flight recording to be processed before shutdown finished")
+	}
+}
+
+func TestStatsColdCacheFallback(t *testing.T) {
+	st := testutil.NewStore(t)
+	eventID, callID, accountID := testutil.IDs(t, st)
+	ctx := context.Background()
+
+	// Ingest with one service instance
+	svc1 := ingest.New(st, stats.NewCache(), nil, slog.Default())
+	evt := ingest.Event{
+		EventID:      eventID,
+		CallID:       callID,
+		AccountID:    accountID,
+		Status:       "completed",
+		DurationSec:  75,
+		OccurredAt:   time.Now(),
+	}
+	if err := svc1.Ingest(ctx, evt); err != nil {
+		t.Fatalf("svc1.Ingest: %v", err)
+	}
+
+	// Simulate a new deployed service instance with a clean in-memory cache
+	svc2 := ingest.New(st, stats.NewCache(), nil, slog.Default())
+	got := svc2.Stats(accountID)
+	if got.CallCount != 1 || got.TotalDurationSec != 75 {
+		t.Fatalf("cold cache fallback failed: got %+v, want CallCount=1 TotalDurationSec=75", got)
+	}
+}
+
 
